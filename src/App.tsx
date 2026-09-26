@@ -1,158 +1,136 @@
+// 页面组合：看板状态在内存中维护，变更后自动存档
+
+import { useEffect, useState } from "react";
 import "./styles.css";
+import { BoardState } from "./domain/types";
+import {
+  addWine,
+  cancelSession,
+  confirmSession,
+  openBottle,
+  reopenSession,
+  replanOne,
+  restock,
+  scheduleSession,
+  SessionDraft,
+} from "./domain/allocation";
+import { isoToday, addDays } from "./domain/dates";
+import { seedState } from "./data/seed";
+import { clearState, loadState, saveState } from "./store/persistence";
+import InventoryPanel from "./components/InventoryPanel";
+import SessionForm from "./components/SessionForm";
+import SessionBoard from "./components/SessionBoard";
 
 const project = {
-  "id": "hxwl-08",
-  "port": 5108,
-  "title": "葡萄酒盲品训练",
-  "subtitle": "产区、品种与感官特征的盲品复习系统",
-  "stack": "React + Vite + TypeScript + CSS",
-  "theme": [
-    "#9f1239",
-    "#047857",
-    "#d97706"
-  ],
-  "domain": "葡萄酒学习",
-  "users": [
-    "侍酒师学员",
-    "讲师",
-    "爱好者"
-  ],
-  "metrics": [
-    "复习卡片",
-    "易混淆酒款",
-    "正确率",
-    "产区覆盖"
-  ],
-  "filters": [
-    "波尔多",
-    "勃艮第",
-    "纳帕",
-    "里奥哈"
-  ],
-  "fields": [
-    "产区",
-    "葡萄品种",
-    "年份",
-    "酸度",
-    "单宁",
-    "酒体",
-    "香气关键词"
-  ],
-  "records": [
-    [
-      "左岸混酿",
-      "赤霞珠",
-      "高单宁",
-      "黑醋栗、雪松、铅笔芯"
-    ],
-    [
-      "勃艮第村级",
-      "黑皮诺",
-      "中等酒体",
-      "红樱桃、蘑菇、湿叶"
-    ],
-    [
-      "里奥哈珍藏",
-      "丹魄",
-      "橡木明显",
-      "香草、椰子、熟李子"
-    ]
-  ]
+  id: "hxwl-08",
+  port: 5108,
+  title: "盲品样酒调度看板",
+  subtitle:
+    "整瓶与开瓶余量分开记，排课先用未过期余量再补整瓶；同一时段超出可出库份数的课程留在待配区并标明缺几份。讲师确认上酒后份额才扣减，取消退整瓶、余量保留到保鲜结束。",
+  stack: "React + Vite + TypeScript + CSS",
 };
 
-const statusColors = ["status-ok", "status-watch", "status-danger"];
-
-function MetricCard({ label, value, index }: { label: string; value: string; index: number }) {
+function MetricCard({ label, value, tone }: { label: string; value: number; tone: string }) {
   return (
     <article className="metric-card">
       <span>{label}</span>
       <strong>{value}</strong>
-      <i className={statusColors[index % statusColors.length]} />
+      <i className={tone} />
     </article>
   );
 }
 
 function App() {
-  const values = project.metrics.map((metric: string, index: number) => {
-    const base = [84, 12, 31, 7][index % 4];
-    return String(base + index * 3);
-  });
+  const [state, setState] = useState<BoardState>(() => loadState() ?? seedState());
+  const [notice, setNotice] = useState("");
+
+  useEffect(() => {
+    saveState(state);
+  }, [state]);
+
+  const today = isoToday();
+
+  const handleConfirm = (id: string) => {
+    const result = confirmSession(state, id, today);
+    if (result.shortages.length > 0) {
+      const names = result.shortages
+        .map((s) => {
+          const wine = state.wines.find((w) => w.id === s.wineId);
+          return `${wine?.name ?? s.wineId} 缺 ${s.missing} 份`;
+        })
+        .join("；");
+      setNotice(`库存不足，无法上酒：${names}`);
+      return;
+    }
+    setNotice("");
+    setState(result.state);
+  };
+
+  const handleReset = () => {
+    clearState();
+    setState(seedState());
+    setNotice("");
+  };
+
+  const soonExpired = state.wines.reduce(
+    (sum, w) =>
+      sum +
+      w.opened
+        .filter((o) => o.remainingPours > 0 && o.freshUntil >= today && o.freshUntil <= addDays(today, 1))
+        .reduce((s, o) => s + o.remainingPours, 0),
+    0
+  );
+
+  const metrics = [
+    { label: "酒款总数", value: state.wines.length, tone: "status-ok" },
+    { label: "待配课程", value: state.sessions.filter((s) => s.status === "pending").length, tone: "status-danger" },
+    { label: "待上酒课程", value: state.sessions.filter((s) => s.status === "ready").length, tone: "status-watch" },
+    { label: "临期余量（份）", value: soonExpired, tone: "status-watch" },
+  ];
 
   return (
     <main className="app-shell">
       <section className="hero">
         <div>
-          <p className="eyebrow">{project.id} · port {project.port}</p>
+          <p className="eyebrow">
+            {project.id} · port {project.port}
+          </p>
           <h1>{project.title}</h1>
           <p className="subtitle">{project.subtitle}</p>
         </div>
         <div className="stack-card">
           <span>技术栈</span>
           <strong>{project.stack}</strong>
+          <button onClick={handleReset}>重置示例数据</button>
         </div>
       </section>
 
       <section className="metrics-grid">
-        {project.metrics.map((metric: string, index: number) => (
-          <MetricCard key={metric} label={metric} value={values[index]} index={index} />
+        {metrics.map((m) => (
+          <MetricCard key={m.label} label={m.label} value={m.value} tone={m.tone} />
         ))}
       </section>
 
+      {notice && <div className="notice">{notice}</div>}
+
       <section className="workspace">
-        <aside className="panel narrow">
-          <h2>角色</h2>
-          <div className="chips">
-            {project.users.map((user: string) => (
-              <span key={user}>{user}</span>
-            ))}
-          </div>
-          <h2>筛选</h2>
-          <div className="chips muted">
-            {project.filters.map((filter: string) => (
-              <button key={filter}>{filter}</button>
-            ))}
-          </div>
-        </aside>
-
-        <section className="panel">
-          <div className="section-heading">
-            <div>
-              <p>{project.domain}</p>
-              <h2>记录字段</h2>
-            </div>
-            <button className="primary-action">新增记录</button>
-          </div>
-          <div className="field-grid">
-            {project.fields.map((field: string) => (
-              <label key={field}>
-                <span>{field}</span>
-                <input placeholder={"填写" + field} />
-              </label>
-            ))}
-          </div>
-        </section>
+        <InventoryPanel
+          wines={state.wines}
+          onRestock={(wineId, n) => setState((s) => restock(s, wineId, n))}
+          onOpenBottle={(wineId, freshUntil) => setState((s) => openBottle(s, wineId, freshUntil, today))}
+          onAddWine={(wine) => setState((s) => addWine(s, wine))}
+        />
+        <SessionForm wines={state.wines} onSchedule={(draft: SessionDraft) => setState((s) => scheduleSession(s, draft))} />
       </section>
 
-      <section className="records panel">
-        <div className="section-heading">
-          <div>
-            <p>示例数据</p>
-            <h2>近期记录</h2>
-          </div>
-          <button>导出摘要</button>
-        </div>
-        <div className="record-list">
-          {project.records.map((record: string[], index: number) => (
-            <article key={record.join("-")} className="record-card">
-              <div className="record-index">{String(index + 1).padStart(2, "0")}</div>
-              <div>
-                <h3>{record[0]}</h3>
-                <p>{record.slice(1).join(" · ")}</p>
-              </div>
-            </article>
-          ))}
-        </div>
-      </section>
+      <SessionBoard
+        sessions={state.sessions}
+        wines={state.wines}
+        onConfirm={handleConfirm}
+        onCancel={(id) => setState((s) => cancelSession(s, id))}
+        onReopen={(id) => setState((s) => reopenSession(s, id))}
+        onReplan={(id) => setState((s) => replanOne(s, id))}
+      />
     </main>
   );
 }
